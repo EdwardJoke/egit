@@ -98,4 +98,4 @@ egit download [OPTIONS] <PACKAGE>
 
 ## License
 
-MIT
+MIT or APACHE 2.0
