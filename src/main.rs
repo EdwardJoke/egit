@@ -2,10 +2,28 @@ use clap::Parser;
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use std::fs::File;
-use std::io::Write;
+use std::io::{self, Read};
 use std::process::exit;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
+
+mod multitread;
+
+// Custom reader that updates a progress bar as it reads data
+struct ProgressReader<R> {
+    reader: R,
+    progress_bar: ProgressBar,
+    bytes_read: u64,
+}
+
+impl<R: Read> Read for ProgressReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let bytes_read = self.reader.read(buf)?;
+        self.bytes_read += bytes_read as u64;
+        self.progress_bar.set_position(self.bytes_read);
+        Ok(bytes_read)
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -21,6 +39,10 @@ enum Command {
         package: String,
         #[arg(short, long, help = "Download source code instead of binary")]
         source: bool,
+        #[arg(long, help = "Enable multithreaded parallel downloads")]
+        multithread: bool,
+        #[arg(long, default_value_t = 4, help = "Number of threads to use for parallel downloads")]
+        threads: usize,
     },
 }
 
@@ -43,7 +65,7 @@ fn main() {
     let args = Args::parse();
 
     match args.command {
-        Command::Download { package, source } => {
+        Command::Download { package, source, multithread, threads } => {
             println!("+ Searching for `{}`...", package);
             
             let (owner, repo, version) = parse_package(&package);
@@ -91,9 +113,9 @@ fn main() {
             }
             
             if source {
-                download_source(&client, target_release, &package);
+                download_source(&client, target_release, &package, multithread, threads);
             } else {
-                download_asset(&client, target_release, &package);
+                download_asset(&client, target_release, &package, multithread, threads);
             }
         }
     }
@@ -126,63 +148,79 @@ fn get_releases(client: &Client, owner: &str, repo: &str) -> Result<Vec<GitHubRe
     response.json()
 }
 
-fn download_asset(client: &Client, release: &GitHubRelease, package: &str) {
+fn download_asset(client: &Client, release: &GitHubRelease, package: &str, multithread: bool, threads: usize) {
     if let Some(asset) = release.assets.first() {
         println!("+ Downloading `{}@{} -> {}`...", 
                  package, release.tag_name, asset.name);
         
-        let response = match client.get(&asset.browser_download_url)
-            .header("User-Agent", "egit-cli")
-            .send() {
-            Ok(resp) => resp,
-            Err(e) => {
-                println!("- Download failed: {}", get_error_message(&e));
-                println!("=== Task End ===");
-                exit(1);
-            }
-        };
-        
         let total_size = asset.size;
-        let pb = ProgressBar::new(total_size);
-        pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
-            .unwrap()
-            .progress_chars("█▉▊▋▌▍▎▏ "));
+        let start_time = std::time::Instant::now();
         
-        let mut file = match File::create(&asset.name) {
-            Ok(file) => file,
-            Err(e) => {
-                println!("- Failed to create file: {}", e);
+        if multithread {
+            println!("+ Using {} threads for parallel download...", threads);
+            
+            match multitread::download_parallel(client, &asset.browser_download_url, &asset.name, total_size, threads) {
+                Ok(_) => {
+                    // Calculate accurate download time
+                    let elapsed = start_time.elapsed().as_secs_f64();
+                    
+                    println!("+ Downloaded `{}@{}` , total size: {:.1}KB | spend {:.1}s.", 
+                             package, release.tag_name, total_size as f64 / 1024.0, elapsed);
+                },
+                Err(e) => {
+                    println!("- Parallel download failed: {}", e);
+                    println!("=== Task End ===");
+                    exit(1);
+                }
+            }
+        } else {
+            let response = match client.get(&asset.browser_download_url)
+                .header("User-Agent", "egit-cli")
+                .send() {
+                Ok(resp) => resp,
+                Err(e) => {
+                    println!("- Download failed: {}", get_error_message(&e));
+                    println!("=== Task End ===");
+                    exit(1);
+                }
+            };
+            
+            let pb = ProgressBar::new(total_size);
+            pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
+                .unwrap()
+                .progress_chars("█▉▊▋▌▍▎▏ "));
+            
+            let mut file = match File::create(&asset.name) {
+                Ok(file) => file,
+                Err(e) => {
+                    println!("- Failed to create file: {}", e);
+                    println!("=== Task End ===");
+                    exit(1);
+                }
+            };
+            
+            // Use custom ProgressReader to stream the response with progress updates
+            let mut reader = ProgressReader {
+                reader: response,
+                progress_bar: pb.clone(),
+                bytes_read: 0,
+            };
+            
+            // Copy the response to the file using the ProgressReader
+            if let Err(e) = io::copy(&mut reader, &mut file) {
+                println!("- Download failed: {}", e);
                 println!("=== Task End ===");
                 exit(1);
             }
-        };
-        
-        let mut downloaded: u64 = 0;
-        let content = match response.bytes() {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                println!("- Failed to read response: {}", get_error_message(&e));
-                println!("=== Task End ===");
-                exit(1);
-            }
-        };
-        
-        let chunk_size = 1024 * 1024;
-        
-        for chunk in content.chunks(chunk_size) {
-            if let Err(e) = file.write_all(chunk) {
-                println!("- Failed to write to file: {}", e);
-                println!("=== Task End ===");
-                exit(1);
-            }
-            downloaded += chunk.len() as u64;
-            pb.set_position(downloaded);
+            
+            pb.finish_with_message("Download completed");
+            
+            // Calculate accurate download time
+            let elapsed = start_time.elapsed().as_secs_f64();
+            
+            println!("+ Downloaded `{}@{}` , total size: {:.1}KB | spend {:.1}s.", 
+                     package, release.tag_name, total_size as f64 / 1024.0, elapsed);
         }
-        
-        pb.finish_with_message("Download completed");
-        
-        println!("+ Downloaded `{}@{}` , total size: {:.1}KB | spend {:.1}s.", 
-                 package, release.tag_name, total_size as f64 / 1024.0, 1.2);
     }
     println!("=== Task End ===");
 }
@@ -211,7 +249,7 @@ fn sanitize_filename(name: &str) -> String {
         .replace('|', "-")
 }
 
-fn download_source(client: &Client, release: &GitHubRelease, package: &str) {
+fn download_source(client: &Client, release: &GitHubRelease, package: &str, multithread: bool, threads: usize) {
     use std::env::consts::OS;
     
     let (source_url, extension) = match OS {
@@ -225,58 +263,88 @@ fn download_source(client: &Client, release: &GitHubRelease, package: &str) {
     println!("+ Downloading `{}@{} -> {}`...", 
              package, release.tag_name, filename);
     
-    let response = match client.get(source_url)
+    let start_time = std::time::Instant::now();
+    
+    // Get total size for progress tracking
+    let total_size = match client.head(source_url)
         .header("User-Agent", "egit-cli")
         .send() {
-        Ok(resp) => resp,
+        Ok(resp) => resp.content_length().unwrap_or(0),
         Err(e) => {
-            println!("- Download failed: {}", get_error_message(&e));
+            println!("- Failed to get file size: {}", get_error_message(&e));
             println!("=== Task End ===");
             exit(1);
         }
     };
     
-    let total_size = response.content_length().unwrap_or(0);
-    let pb = ProgressBar::new(total_size);
-    pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
-        .unwrap()
-        .progress_chars("█▉▊▋▌▍▎▏ "));
-    
-    let mut file = match File::create(&filename) {
-        Ok(file) => file,
-        Err(e) => {
-            println!("- Failed to create file: {}", e);
-            println!("=== Task End ===");
-            exit(1);
+    if multithread {
+        println!("+ Using {} threads for parallel download...", threads);
+        
+        match multitread::download_parallel(client, source_url, &filename, total_size, threads) {
+            Ok(_) => {
+                // Calculate accurate download time
+                let elapsed = start_time.elapsed().as_secs_f64();
+                
+                println!("+ Downloaded `{}@{}` , total size: {:.1}KB | spend {:.1}s.", 
+                         package, release.tag_name, total_size as f64 / 1024.0, elapsed);
+            },
+            Err(e) => {
+                println!("- Parallel download failed: {}", e);
+                println!("=== Task End ===");
+                exit(1);
+            }
         }
-    };
-    
-    let mut downloaded: u64 = 0;
-    let content = match response.bytes() {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            println!("- Failed to read response: {}", get_error_message(&e));
-            println!("=== Task End ===");
-            exit(1);
-        }
-    };
-    
-    let chunk_size = 1024 * 1024;
-    
-    for chunk in content.chunks(chunk_size) {
-        if let Err(e) = file.write_all(chunk) {
-            println!("- Failed to write to file: {}", e);
-            println!("=== Task End ===");
-            exit(1);
-        }
-        downloaded += chunk.len() as u64;
-        pb.set_position(downloaded);
+    } else {
+        let response = match client.get(source_url)
+                .header("User-Agent", "egit-cli")
+                .send() {
+                Ok(resp) => resp,
+                Err(e) => {
+                    println!("- Download failed: {}", get_error_message(&e));
+                    println!("=== Task End ===");
+                    exit(1);
+                }
+            };
+            
+            let pb = ProgressBar::new(total_size);
+            pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})")
+                .unwrap()
+                .progress_chars("█▉▊▋▌▍▎▏ "));
+            
+            let mut file = match File::create(&filename) {
+                Ok(file) => file,
+                Err(e) => {
+                    println!("- Failed to create file: {}", e);
+                    println!("=== Task End ===");
+                    exit(1);
+                }
+            };
+            
+            // Start time for accurate download time calculation
+            let start_time = std::time::Instant::now();
+            
+            // Use custom ProgressReader to stream the response with progress updates
+            let mut reader = ProgressReader {
+                reader: response,
+                progress_bar: pb.clone(),
+                bytes_read: 0,
+            };
+            
+            // Copy the response to the file using the ProgressReader
+            if let Err(e) = io::copy(&mut reader, &mut file) {
+                println!("- Download failed: {}", e);
+                println!("=== Task End ===");
+                exit(1);
+            }
+        
+        pb.finish_with_message("Download completed");
+        
+        // Calculate accurate download time
+        let elapsed = start_time.elapsed().as_secs_f64();
+        
+        println!("+ Downloaded `{}@{}` , total size: {:.1}KB | spend {:.1}s.", 
+                 package, release.tag_name, total_size as f64 / 1024.0, elapsed);
     }
-    
-    pb.finish_with_message("Download completed");
-    
-    println!("+ Downloaded `{}@{}` , total size: {:.1}KB | spend {:.1}s.", 
-             package, release.tag_name, total_size as f64 / 1024.0, 1.2);
     
     println!("=== Task End ===");
 }
