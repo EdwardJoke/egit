@@ -1,5 +1,5 @@
 # egit
-
+![GitHub Release](https://img.shields.io/github/release/EdwardJoke/egit.svg) ![License](https://img.shields.io/badge/license-MIT%20OR%20Apache%202.0-blue.svg) ![Static Badge](https://img.shields.io/badge/Build-Passing-green) 
 A fast and efficient command-line tool for downloading GitHub releases and source code with support for parallel downloads.
 
 ## Features
