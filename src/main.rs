@@ -29,6 +29,7 @@ struct GitHubRelease {
     tag_name: String,
     assets: Vec<GitHubAsset>,
     zipball_url: String,
+    tarball_url: String,
 }
 
 #[derive(Deserialize, Debug)]
@@ -211,9 +212,15 @@ fn sanitize_filename(name: &str) -> String {
 }
 
 fn download_source(client: &Client, release: &GitHubRelease, package: &str) {
-    let source_url = &release.zipball_url;
+    use std::env::consts::OS;
+    
+    let (source_url, extension) = match OS {
+        "windows" => (&release.zipball_url, "zip"),
+        _ => (&release.tarball_url, "tar.gz"),
+    };
+    
     let sanitized_package = sanitize_filename(package);
-    let filename = format!("{}-source.zip", sanitized_package);
+    let filename = format!("{}-source.{}", sanitized_package, extension);
     
     println!("+ Downloading `{}@{} -> {}`...", 
              package, release.tag_name, filename);
