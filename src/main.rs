@@ -7,6 +7,7 @@ use std::process::exit;
 use indicatif::{ProgressBar, ProgressStyle};
 use regex::Regex;
 
+mod assets;
 mod multitread;
 
 // Custom reader that updates a progress bar as it reads data
@@ -43,6 +44,12 @@ enum Command {
         multithread: bool,
         #[arg(long, default_value_t = 4, help = "Number of threads to use for parallel downloads")]
         threads: usize,
+        #[arg(long, help = "List all tags for the repository")]
+        tags: bool,
+        #[arg(long, help = "List all releases for the repository")]
+        releases: bool,
+        #[arg(long, help = "List all assets for the selected release")]
+        assets: bool,
     },
 }
 
@@ -65,7 +72,7 @@ fn main() {
     let args = Args::parse();
 
     match args.command {
-        Command::Download { package, source, multithread, threads } => {
+        Command::Download { package, source, multithread, threads, tags, releases, assets } => {
             println!("+ Searching for `{}`...", package);
             
             let (owner, repo, version) = parse_package(&package);
@@ -73,6 +80,34 @@ fn main() {
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .unwrap();
+            
+            // Handle --tags flag
+            if tags {
+                match assets::fetch_tags(&client, &owner, &repo) {
+                    Ok(tags) => {
+                        assets::display_tags(&tags);
+                    },
+                    Err(e) => {
+                        println!("- Failed to fetch tags: {}", get_error_message(&e));
+                    }
+                }
+                println!("=== Task End ===");
+                return;
+            }
+            
+            // Handle --releases flag
+            if releases {
+                match assets::fetch_releases(&client, &owner, &repo) {
+                    Ok(releases) => {
+                        assets::display_releases(&releases);
+                    },
+                    Err(e) => {
+                        println!("- Failed to fetch releases: {}", get_error_message(&e));
+                    }
+                }
+                println!("=== Task End ===");
+                return;
+            }
             
             let releases = match get_releases(&client, &owner, &repo) {
                 Ok(releases) => releases,
@@ -110,6 +145,31 @@ fn main() {
             if let Some(v) = &version {
                 println!("+ Found `{}@{}` redirecting to `{}@{}`", 
                          package, v, package, target_release.tag_name);
+            }
+            
+            // Handle --assets flag
+            if assets {
+                // Fetch the release with full asset details
+                let releases = match assets::fetch_releases(&client, &owner, &repo) {
+                    Ok(releases) => releases,
+                    Err(e) => {
+                        println!("- Failed to fetch releases: {}", get_error_message(&e));
+                        println!("=== Task End ===");
+                        exit(1);
+                    }
+                };
+                
+                // Find the matching release
+                let release_with_assets = releases.iter().find(|r| r.tag_name == target_release.tag_name)
+                    .unwrap_or_else(|| {
+                        println!("- Release not found");
+                        println!("=== Task End ===");
+                        exit(1);
+                    });
+                
+                assets::display_assets(release_with_assets);
+                println!("=== Task End ===");
+                return;
             }
             
             if source {

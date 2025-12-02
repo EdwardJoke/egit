@@ -1,5 +1,6 @@
 # egit
 ![GitHub Release](https://img.shields.io/github/release/EdwardJoke/egit.svg) ![License](https://img.shields.io/badge/license-MIT%20OR%20Apache%202.0-blue.svg) ![Static Badge](https://img.shields.io/badge/Build-Passing-green) 
+***
 A fast and efficient command-line tool for downloading GitHub releases and source code with support for parallel downloads.
 
 ## Features
@@ -21,8 +22,8 @@ A fast and efficient command-line tool for downloading GitHub releases and sourc
 ### Build from Source
 
 ```bash
-git clone https://github.com/yourusername/egit.git
-cd egit
+git clone https://github.com/EdwardJoke/egit.git
+cd egit/
 cargo build --release
 ```
 
@@ -98,4 +99,4 @@ egit download [OPTIONS] <PACKAGE>
 
 ## License
 
-MIT or APACHE 2.0
+This project is licensed under the MIT License or Apache License 2.0. You can choose the license that best fits your needs.
